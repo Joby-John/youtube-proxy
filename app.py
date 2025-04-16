@@ -7,15 +7,13 @@ import os
 
 app = Flask(__name__)
 
-# Load allowed domains from env (or hardcode)
+# Configuration
 ALLOWED_DOMAINS = os.getenv('ALLOWED_DOMAINS', 'todoapp-babe.onrender.com,www.todoapp-babe.onrender.com').split(',')
 
-# Cache setup (1-hour timeout)
-app.config['CACHE_TYPE'] = 'SimpleCache'
-app.config['CACHE_DEFAULT_TIMEOUT'] = 3600
-cache = Cache(app)
+# Cache setup
+cache = Cache(app, config={'CACHE_TYPE': 'SimpleCache', 'CACHE_DEFAULT_TIMEOUT': 300})
 
-# Rate limiting (100 requests/minute per IP)
+# Rate limiting
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -23,28 +21,33 @@ limiter = Limiter(
 )
 
 @app.route('/proxy-youtube')
-@cache.cached(timeout=300, query_string=True)  # Cache 5 mins per video ID
-@limiter.limit("50 per minute")  # Stricter limit for this endpoint
+@cache.cached(timeout=300, query_string=True)
+@limiter.limit("50 per minute")
 def proxy_youtube():
     video_id = request.args.get('v')
+    origin = request.args.get('origin', request.headers.get('Referer', ''))
+    
     if not video_id:
         abort(400, description="Missing video ID parameter")
     
-    referer = request.headers.get('Referer')
-    if not referer:
-        abort(403, description="Direct access not allowed")
-    
-    referer_domain = urlparse(referer).netloc
-    if not any(allowed in referer_domain for allowed in ALLOWED_DOMAINS):
+    parsed_origin = urlparse(origin).netloc if origin else ''
+    if not any(allowed in parsed_origin for allowed in ALLOWED_DOMAINS):
         abort(403, description="Access denied: YouTube can only be accessed via approved domains")
     
-    return redirect(f'https://www.youtube.com/watch?v={video_id}')
+    response = redirect(f'https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0')
+    response.headers['X-Frame-Options'] = f'ALLOW-FROM {origin}'
+    response.headers['Content-Security-Policy'] = f"frame-ancestors {origin}"
+    return response
 
 @app.errorhandler(400)
 @app.errorhandler(403)
-@app.errorhandler(429)  # Rate limit exceeded
+@app.errorhandler(429)
 def handle_errors(error):
     return {
         "error": error.description,
         "status": error.code
     }, error.code
+
+# Development server (only runs if executed directly)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
